@@ -1,4 +1,10 @@
 <p align="center">
+  <img src="/plan.png">
+ 
+</p>
+
+
+<p align="center">
   <img src="/3d-plot.png">
  
 </p>
