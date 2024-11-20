@@ -1,0 +1,500 @@
+import numpy as np
+from sklearn.datasets import load_iris
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from z3 import *
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.tree import plot_tree
+from sklearn.metrics import accuracy_score, classification_report
+from tqdm import tqdm
+
+
+def compare_robustness(std_clf, robust_clf, adversarial_samples):
+    """
+    Compare standard and robust classifiers on adversarial samples
+
+    Parameters:
+        std_clf: Standard Decision Tree Classifier
+        robust_clf: Robust Decision Tree Classifier
+        adversarial_samples: List of adversarial samples
+
+    Returns:
+        Robustness metrics
+    """
+    # Separate adversarial samples
+    adv_X = np.array([sample[0] for sample in adversarial_samples])
+    true_labels = np.array([sample[1] for sample in adversarial_samples])
+    target_labels = np.array([sample[2] for sample in adversarial_samples])
+
+    # Predictions on adversarial samples
+    std_preds = std_clf.predict(adv_X)
+    robust_preds = robust_clf.predict(adv_X)
+
+    # Accuracy on adversarial samples
+    std_accuracy = accuracy_score(true_labels, std_preds)
+    robust_accuracy = accuracy_score(true_labels, robust_preds)
+
+    # Misclassification analysis
+    std_misclassified = np.sum(std_preds != true_labels)
+    robust_misclassified = np.sum(robust_preds != true_labels)
+
+    return {
+        'std_accuracy': std_accuracy,
+        'robust_accuracy': robust_accuracy,
+        'std_misclassified': std_misclassified,
+        'robust_misclassified': robust_misclassified,
+        'total_adversarial_samples': len(adversarial_samples)
+    }
+def visualize_adversarial_samples(X, y, std_adversarial_samples, feature_names, class_names):
+    if std_adversarial_samples:
+        adv_X = np.array([sample[0] for sample in std_adversarial_samples])
+        true_labels = np.array([sample[1] for sample in std_adversarial_samples])
+        target_labels = np.array([sample[2] for sample in std_adversarial_samples])
+
+        plt.figure(figsize=(13, 5))
+        plt.subplot(1, 2, 1)
+        plt.title("Original Data")
+        for class_idx in np.unique(y):
+            mask = y == class_idx
+            plt.scatter(X[mask, 0], X[mask, 1], alpha=0.7, label=f'Original {class_names[class_idx]}')
+        plt.legend()
+
+        plt.subplot(1, 2, 2)
+        plt.title("Adversarial Samples")
+        for class_idx in np.unique(y):
+            mask = y == class_idx
+            plt.scatter(X[mask, 0], X[mask, 1], alpha=0.2, label=f'Original {class_names[class_idx]}')
+
+        for class_idx in np.unique(target_labels):
+            mask = target_labels == class_idx
+            plt.scatter(adv_X[mask, 0], adv_X[mask, 1],
+                        marker='x', color='red' if class_idx == 0 else 'blue' if class_idx == 1 else 'green',
+                        label=f'Adversarial {class_names[class_idx]}')
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
+def plot_confusion_matrices(std_clf, robust_clf, X_test, y_test, class_names):
+    """
+    Plot confusion matrices for standard and robust decision trees.
+
+    Parameters:
+        std_clf: Standard DecisionTreeClassifier
+        robust_clf: RobustDecisionTreeClassifier
+        X_test: Test feature matrix
+        y_test: Test target labels
+        class_names: List of class names
+    """
+    # Predictions for both classifiers
+    std_pred = std_clf.predict(X_test)
+    robust_pred = robust_clf.predict(X_test)
+
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+
+    # Standard Decision Tree Confusion Matrix
+    cm_std = confusion_matrix(y_test, std_pred)
+    disp_std = ConfusionMatrixDisplay(confusion_matrix=cm_std, display_labels=class_names)
+    disp_std.plot(ax=ax1, cmap=plt.cm.Blues)
+    ax1.set_title("Standard Decision Tree Confusion Matrix")
+
+    # Robust Decision Tree Confusion Matrix
+    cm_robust = confusion_matrix(y_test, robust_pred)
+    disp_robust = ConfusionMatrixDisplay(confusion_matrix=cm_robust, display_labels=class_names)
+    disp_robust.plot(ax=ax2, cmap=plt.cm.Blues)
+    ax2.set_title("Robust Decision Tree Confusion Matrix")
+
+    plt.tight_layout()
+    plt.show()
+
+def plot_decision_trees(std_clf, robust_clf, feature_names, class_names):
+    """
+    Visualize the structure of standard and robust decision trees.
+
+    Parameters:
+        std_clf: Standard DecisionTreeClassifier
+        robust_clf: RobustDecisionTreeClassifier
+        feature_names: List of feature names
+        class_names: List of class names
+    """
+    plt.figure(figsize=(15, 10))
+
+    # Plot standard decision tree
+    plt.subplot(1, 2, 1)
+    plot_tree(std_clf,
+              feature_names=feature_names,
+              class_names=class_names,
+              filled=True,
+              rounded=True,
+              fontsize=10)
+    plt.title("Standard Decision Tree")
+
+    # Plot robust decision tree
+    plt.subplot(1, 2, 2)
+    plot_tree(robust_clf,
+              feature_names=feature_names,
+              class_names=class_names,
+              filled=True,
+              rounded=True,
+              fontsize=10)
+    plt.title("Robust Decision Tree")
+
+    plt.tight_layout()
+    plt.show()
+
+def extract_decision_path(tree, feature_names):
+    """Extract all decision paths from a trained decision tree"""
+    n_nodes = tree.tree_.node_count
+    children_left = tree.tree_.children_left
+    children_right = tree.tree_.children_right
+    feature = tree.tree_.feature
+    threshold = tree.tree_.threshold
+    value = tree.tree_.value
+
+    def recurse(node, path, paths):
+        if children_left[node] == children_right[node]:
+            paths.append((path, np.argmax(value[node])))
+            return
+
+        left_path = path + [(feature_names[feature[node]], threshold[node], "≤")]
+        recurse(children_left[node], left_path, paths)
+
+        right_path = path + [(feature_names[feature[node]], threshold[node], ">")]
+        recurse(children_right[node], right_path, paths)
+
+    paths = []
+    recurse(0, [], paths)
+    return paths
+
+def find_adversarial_example(tree, x_original, target_class, feature_names, feature_bounds, epsilon):
+    """
+    Find an adversarial example using Z3 solver with specified epsilon constraint
+    """
+    s = Solver()
+
+    # Create Z3 variables for features
+    z3_vars = {}
+    for feature in feature_names:
+        z3_vars[feature] = Real(feature)
+
+    # Add dataset bounds constraints
+    for feature, (lower, upper) in feature_bounds.items():
+        s.add(z3_vars[feature] >= lower)
+        s.add(z3_vars[feature] <= upper)
+
+    # Extract decision paths
+    paths = extract_decision_path(tree, feature_names)
+    target_paths = [(path, label) for path, label in paths if label == target_class]
+
+    # Add path constraints
+    path_constraints = []
+    for path, _ in target_paths:
+        path_constraint = []
+        for feature, threshold, op in path:
+            if op == "≤":
+                path_constraint.append(z3_vars[feature] <= threshold)
+            else:
+                path_constraint.append(z3_vars[feature] > threshold)
+        path_constraints.append(And(path_constraint))
+
+    s.add(Or(path_constraints))
+
+    # Add L2 distance constraint using epsilon
+    distance_terms = []
+    for i, feature in enumerate(feature_names):
+        term = (z3_vars[feature] - x_original[i]) * (z3_vars[feature] - x_original[i])
+        distance_terms.append(term)
+
+    s.add(Sum(distance_terms) <= epsilon * epsilon)
+
+    if s.check() == sat:
+        model = s.model()
+        adversarial = [float(model[z3_vars[feature]].as_decimal(32))
+                      for feature in feature_names]
+        return adversarial
+    return None
+
+def find_minimal_adversarial(tree, x_original, target_class, feature_names, feature_bounds,
+                           epsilon_start=5.0, epsilon_min=0.5, epsilon_decay=0.7, max_iters=50):
+    """
+    Iteratively search for the adversarial example with minimal perturbation
+    """
+    best_adversarial = None
+    best_epsilon = float('inf') # Initialize with infinity, so any actual distance will be smaller
+    epsilon = epsilon_start # Start with a large epsilon
+
+    # Create progress bar
+    pbar = tqdm(total=max_iters, desc="Searching for minimal adversarial on tree: " + str(tree))
+
+    while epsilon >= epsilon_min and pbar.n < max_iters:
+        adversarial = find_adversarial_example(
+            tree, x_original, target_class, feature_names, feature_bounds, epsilon
+        )
+
+        if adversarial is not None:
+            # Calculate actual L2 distance
+            actual_distance = np.linalg.norm(np.array(adversarial) - x_original)
+
+            if actual_distance < best_epsilon:
+                best_adversarial = adversarial
+                best_epsilon = actual_distance
+
+            # Reduce epsilon to try finding even smaller perturbation
+            epsilon *= epsilon_decay
+        else:
+            # If no solution found, increase epsilon slightly and try again
+            epsilon /= epsilon_decay ** 0.5
+
+        pbar.update(1)
+        pbar.set_postfix({'best_epsilon': f'{best_epsilon:.4f}'})
+
+    pbar.close()
+    return best_adversarial, best_epsilon
+
+class RobustDecisionTreeClassifier(DecisionTreeClassifier):
+    """
+    A decision tree classifier that incorporates adversarial examples
+    into its training process to improve robustness
+    """
+
+    def __init__(self, max_depth=None, min_samples_split=3, min_samples_leaf=1,
+                    max_adversarial_samples=10, epsilon_start=1.0, epsilon_min=0.06, epsilon_decay=0.7, **kwargs):
+
+           super().__init__(max_depth=max_depth, min_samples_split=min_samples_split,
+                           min_samples_leaf=min_samples_leaf, **kwargs)
+           self.max_adversarial_samples = max_adversarial_samples
+           self.epsilon_start = epsilon_start
+           self.epsilon_min = epsilon_min
+           self.epsilon_decay = epsilon_decay
+           self.adversarial_samples = []
+
+    def fit(self, X, y, feature_names=None):
+        # If feature names not provided, create generic names
+        if feature_names is None:
+            feature_names = [f'feature_{i}' for i in range(X.shape[1])]
+
+        # Define feature bounds
+        feature_bounds = {}
+        for i, feature in enumerate(feature_names):
+            feature_bounds[feature] = (X[:, i].min(), X[:, i].max())
+
+        # First train initial decision tree
+        super().fit(X, y)
+
+        # Generate adversarial samples
+        for class_idx in np.unique(y):
+            # Select samples of the current class
+            class_samples = X[y == class_idx]
+
+            # Try to generate adversarial examples for each sample
+            for x_original in class_samples[:self.max_adversarial_samples]:
+                # Try to find adversarial example targeting a different class
+                target_classes = [c for c in np.unique(y) if c != class_idx]
+
+                for target_class in target_classes:
+                    best_adversarial, _ = find_minimal_adversarial(
+                        self, x_original, target_class, feature_names,
+                        feature_bounds,
+                        epsilon_start=self.epsilon_start,
+                        epsilon_min=self.epsilon_min,
+                        epsilon_decay=self.epsilon_decay
+                    )
+
+                    if best_adversarial is not None:
+                        self.adversarial_samples.append(
+                            (best_adversarial, target_class)
+                        )
+
+        # Augment training data with adversarial samples
+        if self.adversarial_samples:
+            adv_X, adv_y = zip(*self.adversarial_samples)
+            augmented_X = np.vstack((X, np.array(adv_X)))
+            augmented_y = np.concatenate((y, np.array(adv_y)))
+
+            # Retrain with augmented dataset
+            super().fit(augmented_X, augmented_y)
+
+        return self
+
+def adversarial_samples_all_classes(tree, X, y, feature_names, num_attempts=10):
+    """
+    Generate adversarial samples for all classes in the tree
+
+    Parameters:
+        tree: Trained decision tree classifier
+        X: Original feature matrix
+        y: Original target labels
+        feature_names: List of feature names
+        num_attempts: Number of attempts to generate adversarial samples per class
+
+    Returns:
+        list of tuples (adversarial_sample, original_label, target_label)
+    """
+    # Define feature bounds
+    feature_bounds = {}
+    for i, feature in enumerate(feature_names):
+        feature_bounds[feature] = (X[:, i].min(), X[:, i].max())
+
+    adversarial_samples = []
+
+    # Unique classes in the dataset
+    unique_classes = np.unique(y)
+
+    for class_idx in unique_classes:
+        # Select samples of the current class
+        class_samples = X[y == class_idx]
+
+        # Limit the number of attempts per class
+        for x_original in class_samples[:num_attempts]:
+            # Try to find adversarial example targeting a different class
+            target_classes = [c for c in unique_classes if c != class_idx]
+
+            for target_class in target_classes:
+                best_adversarial, best_epsilon = find_minimal_adversarial(
+                    tree, x_original, target_class, feature_names,
+                    feature_bounds,
+                    epsilon_start=3.0,
+                    epsilon_min=0.5,
+                    epsilon_decay=0.7
+                )
+
+                if best_adversarial is not None and tree.predict([x_original])[0] == class_idx and tree.predict([best_adversarial])[0] == target_class:
+                    adversarial_samples.append((
+                        best_adversarial,
+                        class_idx,  # Original true label
+                        target_class  # Targeted misclassification label
+                    ))
+
+    return adversarial_samples
+def plot_robustness_comparison(std_clf, robust_clf, X_test, y_test, class_names):
+    """
+    Create comprehensive visualizations comparing standard and robust classifiers.
+    """
+    plt.figure(figsize=(20, 12))
+
+    # 1. Confusion Matrices
+    plt.subplot(2, 2, 1)
+    std_pred = std_clf.predict(X_test)
+    cm_std = confusion_matrix(y_test, std_pred)
+    disp_std = ConfusionMatrixDisplay(confusion_matrix=cm_std, display_labels=class_names)
+    disp_std.plot(ax=plt.gca(), cmap=plt.cm.Blues)
+    plt.title("Standard Decision Tree\nConfusion Matrix")
+
+    # 2. Robust Confusion Matrix
+    plt.subplot(2, 2, 2)
+    robust_pred = robust_clf.predict(X_test)
+    cm_robust = confusion_matrix(y_test, robust_pred)
+    disp_robust = ConfusionMatrixDisplay(confusion_matrix=cm_robust, display_labels=class_names)
+    disp_robust.plot(ax=plt.gca(), cmap=plt.cm.Blues)
+    plt.title("Robust Decision Tree\nConfusion Matrix")
+
+    # 3. Classification Reports
+    plt.subplot(2, 2, 3)
+    plt.axis('off')
+    plt.text(0.1, 0.5, "Standard Classifier\n" +
+             classification_report(y_test, std_pred, target_names=class_names),
+             fontsize=10, family='monospace')
+
+    # 4. Robust Classification Report
+    plt.subplot(2, 2, 4)
+    plt.axis('off')
+    plt.text(0.1, 0.5, "Robust Classifier\n" +
+             classification_report(y_test, robust_pred, target_names=class_names),
+             fontsize=10, family='monospace')
+
+    plt.tight_layout()
+    plt.suptitle("Classifier Performance Comparison", fontsize=16)
+    plt.show()
+
+def plot_feature_importance(std_clf, robust_clf, feature_names):
+    """
+    Visualize feature importances for standard and robust classifiers.
+    """
+    plt.figure(figsize=(12, 6))
+
+    # Standard Classifier Feature Importance
+    plt.subplot(1, 2, 1)
+    std_importances = std_clf.feature_importances_
+    std_indices = np.argsort(std_importances)[::-1]
+    plt.title("Standard Classifier\nFeature Importances")
+    plt.bar(range(len(feature_names)), std_importances[std_indices])
+    plt.xticks(range(len(feature_names)), [feature_names[i] for i in std_indices], rotation=45)
+    plt.ylabel("Importance")
+
+    # Robust Classifier Feature Importance
+    plt.subplot(1, 2, 2)
+    robust_importances = robust_clf.feature_importances_
+    robust_indices = np.argsort(robust_importances)[::-1]
+    plt.title("Robust Classifier\nFeature Importances")
+    plt.bar(range(len(feature_names)), robust_importances[robust_indices])
+    plt.xticks(range(len(feature_names)), [feature_names[i] for i in robust_indices], rotation=45)
+    plt.ylabel("Importance")
+
+    plt.tight_layout()
+    plt.show()
+
+def main():
+    # Set random seed for reproducibility
+    np.random.seed(42)
+
+    # Load dataset
+    iris = load_iris()
+    X = iris.data
+    y = iris.target
+    feature_names = iris.feature_names
+    class_names = iris.target_names
+
+    # Split the data
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+    # Train standard and robust classifiers
+    std_clf = DecisionTreeClassifier(max_depth=3, random_state=42)
+    robust_clf = RobustDecisionTreeClassifier(max_depth=3,
+                                              max_adversarial_samples=15,  # Slightly increased
+                                              epsilon_start=2.0,  # Adjusted epsilon parameters
+                                              epsilon_min=0.5,
+                                              epsilon_decay=0.6,
+                                              random_state=42)
+
+    # Fit classifiers
+    std_clf.fit(X_train, y_train)
+    robust_clf.fit(X_train, y_train, feature_names=feature_names)
+
+    # Generate adversarial samples using the standard classifier
+    std_adversarial_samples = adversarial_samples_all_classes(
+        std_clf, X_train, y_train, feature_names, num_attempts=15
+    )
+
+    # Compare robustness on these adversarial samples
+    robustness_metrics = compare_robustness(std_clf, robust_clf, std_adversarial_samples)
+
+    # Print robustness analysis
+    print("\nAdversarial Sample Robustness Analysis:")
+    print(f"Total Adversarial Samples: {robustness_metrics['total_adversarial_samples']}")
+    print(f"Standard Classifier Accuracy on Adversarial Samples: {robustness_metrics['std_accuracy']:.2%}")
+    print(f"Robust Classifier Accuracy on Adversarial Samples: {robustness_metrics['robust_accuracy']:.2%}")
+    print(f"Standard Classifier Misclassified: {robustness_metrics['std_misclassified']}")
+    print(f"Robust Classifier Misclassified: {robustness_metrics['robust_misclassified']}")
+
+    print("\nOverall Classifier Performance:")
+    print(f"Standard Decision Tree Test Accuracy: {std_clf.score(X_test, y_test):.2%}")
+    print(f"Robust Decision Tree Test Accuracy: {robust_clf.score(X_test, y_test):.2%}")
+
+    # Visualizations
+    # 1. Robustness Comparison Plot
+    plot_robustness_comparison(std_clf, robust_clf, X_test, y_test, class_names)
+
+    # 2. Feature Importance Comparison
+    plot_feature_importance(std_clf, robust_clf, feature_names)
+
+    # 3. Decision Tree Structure (if not too complex)
+    plot_decision_trees(std_clf, robust_clf, feature_names, class_names)
+
+    # Optional: Visualize Adversarial Samples (if you want to see the perturbations)
+    if std_adversarial_samples:
+        visualize_adversarial_samples(X_train, y_train, std_adversarial_samples, feature_names, class_names)
+
+if __name__ == "__main__":
+    main()
